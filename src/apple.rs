@@ -3,7 +3,8 @@ extern crate libc;
 use std::num::NonZeroUsize;
 
 use self::libc::{
-    kern_return_t, mach_port_t, natural_t, task_threads, thread_act_array_t, vm_size_t,
+    kern_return_t, mach_port_t, natural_t, task_threads, thread_act_array_t, vm_address_t,
+    vm_deallocate,
 };
 
 #[allow(non_camel_case_types)]
@@ -11,13 +12,6 @@ use self::libc::{
 type mach_port_name_t = natural_t;
 
 extern "C" {
-    // https://developer.apple.com/documentation/kernel/1402285-mach_vm_deallocate
-    fn mach_vm_deallocate(
-        target_task: mach_port_t,
-        address: *mut u32,
-        size: vm_size_t,
-    ) -> kern_return_t;
-
     // https://developer.apple.com/documentation/kernel/1578777-mach_port_deallocate
     fn mach_port_deallocate(task: mach_port_t, name: mach_port_name_t) -> kern_return_t;
 }
@@ -41,11 +35,11 @@ pub(crate) fn num_threads() -> Option<NonZeroUsize> {
                 mach_port_deallocate(task, *(thread_list.offset(thread as isize)) as u32);
             }
         }
-        // Deallocate the thread list
+        // Deallocate the thread list's memory, now that everything inside of it has been released.
         unsafe {
-            mach_vm_deallocate(
+            vm_deallocate(
                 task,
-                thread_list,
+                thread_list as vm_address_t,
                 std::mem::size_of::<mach_port_t>() * thread_count as usize,
             );
         }
