@@ -1,5 +1,6 @@
 extern crate libc;
 
+use std::convert::TryInto;
 use std::num::NonZeroUsize;
 
 use self::libc::{
@@ -29,22 +30,28 @@ pub(crate) fn num_threads() -> Option<NonZeroUsize> {
     let result = unsafe { task_threads(task, &mut thread_list, &mut thread_count) };
 
     if result == libc::KERN_SUCCESS {
+        // It is impossible for the early return below to be taken and cause a memory leak:
+        // - `u32` -> `usize` is infallible on any Apple target because the minimum pointer size
+        //   anywhere is 32-bit,
+        // - It is not possible for a process to have 0 threads and be alive, so this code running
+        //   proves at least one thread exists
+        let thread_count = thread_count.try_into().ok().and_then(NonZeroUsize::new)?;
+
         // Deallocate the mach port rights for the threads
-        for thread in 0..thread_count {
-            unsafe {
-                mach_port_deallocate(task, *(thread_list.offset(thread as isize)) as u32);
-            }
+        for thread in 0..thread_count.get() {
+            unsafe { mach_port_deallocate(task, *(thread_list.add(thread))) };
         }
         // Deallocate the thread list's memory, now that everything inside of it has been released.
         unsafe {
             vm_deallocate(
                 task,
+                // XXX: Use `expose_provenance` when MSRV is high enough.
                 thread_list as vm_address_t,
-                std::mem::size_of::<mach_port_t>() * thread_count as usize,
+                thread_count.get() * std::mem::size_of::<mach_port_t>(),
             );
         }
 
-        NonZeroUsize::new(thread_count as usize)
+        Some(thread_count)
     } else {
         None
     }
