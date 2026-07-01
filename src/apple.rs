@@ -15,6 +15,10 @@ type mach_port_name_t = natural_t;
 extern "C" {
     // https://developer.apple.com/documentation/kernel/1578777-mach_port_deallocate
     fn mach_port_deallocate(task: mach_port_t, name: mach_port_name_t) -> kern_return_t;
+    // `libc::mach_task_self` (deprecated) wraps this and its SDK header states that it
+    // is concurrency safe (mach/mach_init.h):
+    // `extern __swift_nonisolated_unsafe mach_port_t mach_task_self_;`
+    static mut mach_task_self_: mach_port_t;
 }
 
 pub(crate) fn num_threads() -> Option<NonZeroUsize> {
@@ -23,11 +27,10 @@ pub(crate) fn num_threads() -> Option<NonZeroUsize> {
     let mut thread_count = 0;
 
     // Safety:
-    //  - `mach_task_self` always returns a valid value,
+    //  - `mach_task_self` is always valid to access,
     //  - `thread_list` is a pointer that will point to kernel allocated memory that needs to be
     //    deallocated if the call succeeds
-    let task = unsafe { libc::mach_task_self() };
-    let result = unsafe { task_threads(task, &mut thread_list, &mut thread_count) };
+    let result = unsafe { task_threads(mach_task_self_, &mut thread_list, &mut thread_count) };
 
     if result == libc::KERN_SUCCESS {
         // It is impossible for the early return below to be taken and cause a memory leak:
@@ -39,12 +42,20 @@ pub(crate) fn num_threads() -> Option<NonZeroUsize> {
 
         // Deallocate the mach port rights for the threads
         for thread in 0..thread_count.get() {
-            unsafe { mach_port_deallocate(task, *(thread_list.add(thread))) };
+            // Safety:
+            // - `mach_task_self` is always valid to access,
+            // - `thread_list` is valid to read and `thread` is always within the array's bounds
+            unsafe { mach_port_deallocate(mach_task_self_, *(thread_list.add(thread))) };
         }
         // Deallocate the thread list's memory, now that everything inside of it has been released.
+        // Safety:
+        // `mach_task_self` is always valid to access,
+        // `thread_list` was originally allocated as kernel memory and has not been modified.
+        // `size` is the same number of elements returned by the original call and the same number
+        // deallocated above.
         unsafe {
             vm_deallocate(
-                task,
+                mach_task_self_,
                 // XXX: Use `expose_provenance` when MSRV is high enough.
                 thread_list as vm_address_t,
                 thread_count.get() * std::mem::size_of::<mach_port_t>(),
